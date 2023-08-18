@@ -85,6 +85,8 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
+import vendor.xiaomi.hardware.fingerprintextension.V1_0.IXiaomiFingerprint;
+
 /**
  * System service that provides an interface for authenticating with biometrics and
  * PIN/pattern/password to BiometricPrompt and lock screen.
@@ -103,6 +105,7 @@ public class AuthService extends SystemService {
     @VisibleForTesting
     final IAuthService.Stub mImpl;
 
+    private IXiaomiFingerprint mXiaomiFingerprint = null;
     /**
      * Class for injecting dependencies into AuthService.
      * TODO(b/141025588): Replace with a dependency injection framework (e.g. Guice, Dagger).
@@ -839,6 +842,38 @@ public class AuthService extends SystemService {
             }
         }
 
+        try {
+            mXiaomiFingerprint = IXiaomiFingerprint.getService();
+            android.util.Log.e("PHH", "Got xiaomi fingerprint HAL");
+        } catch(Exception e) {
+            android.util.Log.e("PHH", "Failed getting xiaomi fingerprint HAL", e);
+        }
+
+        String xiaomiFodPressedStatusPath = "/sys/class/touch/touch_dev/fod_press_status";
+        if(new File(xiaomiFodPressedStatusPath).exists()) {
+            fodFileObserver = new FileObserver(xiaomiFodPressedStatusPath, FileObserver.MODIFY) {
+                @Override
+                public void onEvent(int event, String path) {
+                    String isFodPressed = readFile(xiaomiFodPressedStatusPath);
+                    Slog.d("PHH-Enroll", "Fod pressed status: " + isFodPressed);
+                    Slog.d("PHH-Enroll", "Within xiaomi scenario for FOD");
+
+                    try {
+                    if("0".equals(isFodPressed)) {
+                        Slog.d("PHH-Enroll", "Fod un-pressed!");
+                        mXiaomiFingerprint.extCmd(android.os.SystemProperties.getInt("phh.xiaomi.fod.enrollment.id", 4), 0);
+                    } else if("1".equals(isFodPressed)) {
+                        Slog.d("PHH-Enroll", "Fod pressed!");
+                        mXiaomiFingerprint.extCmd(android.os.SystemProperties.getInt("phh.xiaomi.fod.enrollment.id", 4), 1);
+                    }
+                    } catch(Exception e) {
+                        Slog.d("PHH-Enroll", "Failed Xiaomi async extcmd", e);
+                    }
+                }
+            };
+            fodFileObserver.startWatching();
+        }
+
         final IIrisService irisService = mInjector.getIrisService();
         if (irisService != null) {
             try {
@@ -1039,6 +1074,23 @@ public class AuthService extends SystemService {
                 ? modality : (modality & ~BiometricAuthenticator.TYPE_CREDENTIAL);
     }
 
+    private int[] dynamicUdfpsProps() {
+        DisplayManager mDM = (DisplayManager) getContext().getSystemService(Context.DISPLAY_SERVICE);
+        Point displayRealSize = new Point();
+        DisplayMetrics displayMetrics = new DisplayMetrics();
+        mDM.getDisplay(0).getRealSize(displayRealSize);
+        mDM.getDisplay(0).getMetrics(displayMetrics);
+
+        int[] udfpsProps = new int[3];
+        String[] coordinates = android.os.SystemProperties.get("persist.vendor.sys.fp.fod.location.X_Y").split(",");
+        udfpsProps[0] = displayRealSize.x/2;
+        udfpsProps[1] = Integer.parseInt(coordinates[1]) + 100;
+
+        String[] widthHeight = android.os.SystemProperties.get("persist.vendor.sys.fp.fod.size.width_height").split(",");
+
+        udfpsProps[2] = (Integer.parseInt(widthHeight[0]) /2);
+        return udfpsProps;
+    }
 
     private FingerprintSensorPropertiesInternal getHidlFingerprintSensorProps(int sensorId,
             @BiometricManager.Authenticators.Types int strength) {
