@@ -30,6 +30,21 @@ import com.android.systemui.biometrics.shared.model.UdfpsOverlayParams
 import com.android.systemui.doze.DozeReceiver
 import com.android.systemui.res.R
 
+import android.graphics.PixelFormat
+import android.graphics.PointF
+import android.os.FileObserver
+import android.view.SurfaceHolder
+import android.view.SurfaceView
+import android.view.ViewGroup
+import java.io.File
+import java.io.FileNotFoundException
+
+import vendor.xiaomi.hw.touchfeature.ITouchFeature
+import vendor.xiaomi.hardware.fingerprintextension.IXiaomiFingerprint
+
+import android.os.Handler
+import android.os.HandlerThread
+
 private const val TAG = "UdfpsView"
 
 /**
@@ -41,6 +56,54 @@ class UdfpsView(
 ) : FrameLayout(context, attrs), DozeReceiver {
     // sensorRect may be bigger than the sensor. True sensor dimensions are defined in
     // overlayParams.sensorBounds
+    private var currentOnIlluminatedRunnable: Runnable? = null
+    private val mySurfaceView = SurfaceView(context)
+    init {
+        mySurfaceView.setVisibility(INVISIBLE)
+        mySurfaceView.setZOrderOnTop(true)
+        addView(mySurfaceView, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        mySurfaceView.holder.addCallback(object: SurfaceHolder.Callback{
+            override fun surfaceCreated(p0: SurfaceHolder) {
+                Log.d("Xiaomi-FP", "Surface created!")
+                val paint = Paint(0 /* flags */);
+                paint.setAntiAlias(true);
+                paint.setStyle(Paint.Style.FILL);
+                val colorStr = android.os.SystemProperties.get("persist.sys.fod_color", "00ff00");
+                try {
+                    val parsedColor = Color.parseColor("#" + colorStr);
+                    val r = (parsedColor shr 16) and 0xff;
+                    val g = (parsedColor shr  8) and 0xff;
+                    val b = (parsedColor shr  0) and 0xff;
+                    paint.setARGB(255, r, g, b);
+                } catch(t: Throwable) {
+                    Log.d("Xiaomi-FP", "Failed parsing color #" + colorStr, t);
+                }
+                var canvas: Canvas? = null
+                try {
+                    canvas = p0.lockCanvas();
+                    Log.d("Xiaomi-FP", "Surface dimensions ${canvas.getWidth()*1.0f} ${canvas.getHeight()*1.0f}")
+                    canvas.drawOval(RectF(overlayParams.sensorBounds), paint);
+                } finally {
+                    // Make sure the surface is never left in a bad state.
+                    if (canvas != null) {
+                        p0.unlockCanvasAndPost(canvas);
+                    }
+                }
+
+                currentOnIlluminatedRunnable?.run()
+            }
+
+            override fun surfaceChanged(p0: SurfaceHolder, p1: Int, p2: Int, p3: Int) {
+                Log.d("Xiaomi-FP", "Got surface size $p1 $p2 $p3")
+            }
+
+            override fun surfaceDestroyed(p0: SurfaceHolder) {
+                Log.d("Xiaomi-FP", "Surface destroyed!")
+            }
+        })
+        mySurfaceView.holder.setFormat(PixelFormat.RGBA_8888)
+
+    }
     var sensorRect = Rect()
     private var mUdfpsDisplayMode: UdfpsDisplayModeProvider? = null
     private val debugTextPaint = Paint().apply {
@@ -111,9 +174,18 @@ class UdfpsView(
         }
     }
 
+    val xiaomiDispParam = "/sys/class/mi_display/disp-DSI-0/disp_param"
+
+    private val handlerThread = HandlerThread("UDFPS").also { it.start() }
+    val myHandler = Handler(handlerThread.looper)
+
     fun configureDisplay(onDisplayConfigured: Runnable) {
         isDisplayConfigured = true
         animationViewController?.onDisplayConfiguring()
+
+        mySurfaceView.setVisibility(VISIBLE)
+        Log.d("Xiaomi-FP", "setting surface visible!")
+
         val gView = ghbmView
         if (gView != null) {
             gView.setGhbmIlluminationListener(this::doIlluminate)
@@ -133,6 +205,36 @@ class UdfpsView(
             onDisplayConfigured?.run()
             ghbmView?.drawIlluminationDot(RectF(sensorRect))
         }
+
+        Log.d("Xiaomi-FP-Enroll", "Xiaomi scenario in UdfpsView reached!")
+        mySurfaceView.setVisibility(INVISIBLE)
+
+        IXiaomiFingerprint.getService().extCmd(android.os.SystemProperties.getInt("persist.xiaomi.fod.enrollment.id", 4), 1);
+
+        var res = ITouchFeature.getService().setTouchMode(0, 10, 1);
+
+        if(res != 0){
+            Log.d("Xiaomi-FP-Enroll", "SetTouchMode 10,1 was NOT executed successfully. Res is " + res)
+        }
+
+        myHandler.postDelayed({
+
+            var ret200 = ITouchFeature.getService().setTouchMode(0, 10, 1);
+            if(ret200 != 0){
+                Log.d("Xiaomi-FP-Enroll", "myHandler.postDelayed 200ms -SetTouchMode was NOT executed successfully. Ret is " + ret200)
+            }
+
+            myHandler.postDelayed({
+                Log.d("Xiaomi-FP-Enroll", "myHandler.postDelayed 600ms - line prior to setTouchMode 10,0")
+
+                var ret600 = ITouchFeature.getService().setTouchMode(0, 10, 0);
+
+                if(ret600 != 0){
+                    Log.d("Xiaomi-FP-Enroll", "myHandler.postDelayed 600ms -SetTouchMode 10,0 was NOT executed successfully. Ret is " + ret600)
+                }
+            }, 600)
+
+        }, 200)
     }
 
     fun unconfigureDisplay() {
@@ -143,5 +245,11 @@ class UdfpsView(
             view.visibility = INVISIBLE
         }
         mUdfpsDisplayMode?.disable(null /* onDisabled */)
+
+        IXiaomiFingerprint.getService().extCmd(android.os.SystemProperties.getInt("persist.xiaomi.fod.enrollment.id", 4), 0);
+        ITouchFeature.getService().setTouchMode(0, 10, 0);
+
+        mySurfaceView.setVisibility(INVISIBLE)
+        Log.d("Xiaomi-FP", "setting surface invisible!")
     }
 }
